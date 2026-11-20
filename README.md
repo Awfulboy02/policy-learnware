@@ -94,3 +94,22 @@ policy-learnware prepare walker \
 - **结果**记录入围和选中策略、距离、估值、数据预算对应的轨迹索引与耗时。共享 AM 拟合与候选评分分开计时。total 是读取清单后本地处理的墙钟时间，含当前进程首次加载估值模块的开销。它不测网络传输。完整经验 KME 对照计算查询的核自相似项，比较检索效率时应单独说明这项开销。评分报告逐条闭环回报，并把总 regret 分成召回损失（全池最好减去入围最好）和重排损失（入围最好减去最终选中）。估值或距离完全相同时按候选 ID 稳定排序。
 
 来自不同初始条件的来源和需求 RKME 距离描述观测到的行为占用。候选在目标上的闭环表现要用留出的真实回报验证。少量专家数据对候选动作覆盖不足时，FQE 和 AM 均可能外推失准。Walker 的 20 个条件共享同一原生任务，历史测试适合做回顾性评估。
+
+## 来源策略扩建
+
+在同时提供 PyTorch 与 MuJoCo Playground 的环境里，从随机权重训练一个来源、一个种子。共享服务器已有 `/share/songyf/RL_Learnware/.kmepoa_envs/e01_matrix_py312/bin/python`，可在独立工作树中设 `PYTHONPATH=src`。模拟器和训练器共用 GPU 时设 `XLA_PYTHON_CLIENT_PREALLOCATE=false`，并用 `CUDA_VISIBLE_DEVICES` 选择空闲卡。
+
+```sh
+python -m policy_learnware.expansion --task CheetahRun --source s0 --algorithm sac \
+  --seed 23 --num-envs 16 --width 128 --batch-size 128 --warmup 1024 \
+  --steps 32768 125000 500000 1000000 --out runs/cheetah-s0-sac-r23
+
+python -m policy_learnware.expansion_report runs/cheetah-s0-sac-r23 \
+  --out runs/expansion-summary --behavior
+```
+
+任务为 `CheetahRun`、`WalkerWalk`、`ReacherEasy`，每个任务有 `s0/s1` 两个归档来源初态分布。时域 1000，action repeat 1。SAC 使用自动温度和双 Q，TD3 使用延迟 actor、target smoothing 和双 Q，PPO-Clip 使用 tanh Gaussian 与 GAE，D4PG 使用同步向量采集、五步回报、51 原子分布 critic 和均匀回放。D4PG 采用同步实现，原论文还研究了分布式异步采集与优先回放。三个离策略训练器默认每个向量采集步更新一次，改变并行环境数会改变每个真实环境步的更新量。四种方法通过确定性 actor 评估和部署。
+
+预算是同一次训练的累计真实环境步数。切片向上对齐到向量批次，PPO 另对齐到完整 rollout，`recipe.json` 保留请求值与实际值。每个切片保存可独立加载的冻结 actor 和验证回报，训练继续沿用原来的优化器及训练状态。按验证均值选一个快照，平分时取较早者，再用 16 个独立回合与来源门槛比较。通过后生成独立的规约轨迹和共同保留初态上的行为诊断轨迹。四组数据分别用于选择、复核、规约、行为比较。训练折扣为 0.99，准入使用未折扣的完整回合累计奖励。单次运行的输出目录需为新目录，快照用于部署和评估。
+
+每次传入一个或多个独立运行目录给 `expansion_report`。汇总中的单卡训练小时包含未达标训练，GPU 训练小时与整次训练及评估的墙钟时间分别计量。输出的 `<任务>/source.json` 可直接传给 `policy-learnware specify` 并配用同任务的 settings。可选行为比较按相同来源和接近的复核回报组成策略对，报告动作 MSE、两组保留轨迹各自的占用 MMD，并按控制时间段记录 Cheetah 向前速度。
