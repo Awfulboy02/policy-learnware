@@ -6,8 +6,6 @@ import numpy as np
 
 from .data import read_json, write_json
 
-from .data import read_json, write_json
-
 
 def load_policy(spec):
     """Exported BC actor on raw Walker observations; accepts a batch of states."""

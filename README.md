@@ -1,6 +1,50 @@
-# Policy Learnware v0
+# Policy Learnware v0.1
 
 用上传策略在来源任务上的执行轨迹建立 RKME。复用者在本地把有限的目标专家轨迹压缩为需求规约，平台用核距离召回冻结策略，然后复用者用同一批日志执行 FQE 或 AM，通过估计的目标任务回报选出一个策略。代码在一台机器上模拟各方的数据流。独立的评分命令读取留出的真实闭环回报。
+
+## v0.1 扩量资产与权限面板
+
+三个原生任务分别检索。用 `prepare-am10` 将冻结源资产、需求轨迹和外部评分索引成三套清单。在共享服务器上可使用既有的 NumPy、PyTorch 和 JAX 环境。只在调用 AM10 冻结策略时需要 JAX，本地安装选项为 `pip install -e '.[am10]'`。
+
+```sh
+policy-learnware prepare-am10 --experiments /share/songyf/RL_Learnware/experiments --out runs/am10
+```
+
+每个任务目录的 `audit.json` 保存逐策略的四条来源准入回报和阈值。后四条最终策略自身轨迹专用于上传规约。`source.json` 只收录达标且具有所有目标评分面板的候选；`source_all.json` 包含其余来源达标资产，适合检索耗时测量。真实评分缺少独立参考专家时，`score` 仍计算池内 regret，并将 expert_gap 记为空。来源准入是小样本经验判断。
+
+在 `specify` 上用 `--source-budget`、`--source-prefix` 控制上传观测量。在 `rank` 上用 `--budget`、`--user-prefix` 控制用户观测量，用 `--pool-size`、`--pool-seed` 从来源与算法分层的嵌套子池中取样。核均值分别以各端可见时域的折扣和归一化，长度不同的前缀距离用作召回指标。OPE 只能看到用户提供的转移，人工截短允许在最后一个已知后继状态自举。归档评分保持部署时域 H。有限日志难以识别未观测时域的结果。`--on-invalid abstain` 为默认设置，有非有限入围估值的请求保留失败记录；`--on-invalid raw` 允许在 RKME 召回下转回最近邻，同时记录回退。每个策略保留原部署形态，随机策略用候选专属、由调用者指定种子的随机数流。
+
+```sh
+policy-learnware summarize --scores runs/same_setting/*.json --out runs/summary.json
+```
+
+每次汇总一个任务、一个实验设置下的评分文件。重复子集种子先按请求求均值。结果分列估值成功数、回退数、返回选择的次数及本地排序时间 P50/P95。计时覆盖用户数据、检索和估值，不含网络传输。归档面板中的最佳候选只用于评分。
+
+### 全池比较
+
+```sh
+policy-learnware full-pool --panel panel.json --method wdr --folds 2 --out runs/wdr.json
+```
+
+离散面板包含 `request`、`horizon`、`gamma`、`policies` 和 `episodes`。可选 `task`、`split` 用于汇总。候选值是 `[S,A]` 或 `[H,S,A]` 动作分布。每条 episode 提供逐步 `states, actions, rewards` 和可选 `terminated`。短于 H 的记录须明确真正终止。例中状态、动作是整数 ID，两条轨迹是两个独立 episode。
+
+```json
+{"request":"example","horizon":1,"gamma":0.9,
+ "policies":{"a":[[1,0]],"b":[[0,1]]},
+ "episodes":[{"states":[0],"actions":[0],"rewards":[1],"behavior_probs":[[0.5,0.5]]},
+             {"states":[0],"actions":[1],"rewards":[2],"behavior_probs":[[0.5,0.5]]}]}
+```
+
+| 方法名 | 权限与实施口径 |
+|---|---|
+| `is, wis, pdis, wpdis` | 整轨迹及逐决策两种加权口径。读取每步真实行为概率 `behavior_action_prob` 或完整 `behavior_probs`，输出 ESS 和零分母诊断。 |
+| `dr, wdr, mrdr` | 按完整 episode 交叉拟合本地 critic。DR 和 WDR 使用同一分折和表格 Bellman 拟合，分别用原始和归一化权重校正。MRDR 按方差目标拟合，假定一个 Markov 日志策略；随机候选需要完整行为动作分布。 |
+| `dualdice, bestdice` | 时间增广并补零奖励吸收态，要求 γ<1、经验占用覆盖。精确求解表格占用流；BestDICE 的正性与单位质量在有覆盖的精确解上自动满足，二者返回相同点估值。输出普通折扣和、占用比和样本内流残差。不能据此比较两种神经鞍点优化器。 |
+| `fqe, am` | 在同一离散面板使用表格 Bellman 回归和经验转移模型前向传播，对齐候选、样本、折扣及回报尺度。充分覆盖时两种精确表格解相同。连续控制仍通过 `rank` 使用原版神经 FQE/AM。 |
+
+另外，`kind="log_probs"` 面板支持连续或离散策略的 `is,wis,pdis,wpdis`。提供 `candidates` 名单，以及每条 episode 的 `rewards`、`behavior_log_prob` 和 `target_log_probs`（候选 ID 到逐步对数概率/密度）。候选概率为零可用 JSON null。使用者需先确认在同一动作测度下存在支撑覆盖，并声明 `common_support=true`；逐步分数本身不能证明全局覆盖。归档的确定性连续 Walker 日志缺少所需权限。两种面板都不读取判分真值，不可估的候选保留原因；全池未能完成比较时，选中策略为空。
+
+原方法来源包括 [DR](https://proceedings.mlr.press/v48/jiang16.html)、[WDR](https://proceedings.mlr.press/v48/thomasa16.html)、[MRDR](https://proceedings.mlr.press/v80/farajtabar18a.html)、[DualDICE](https://papers.neurips.cc/paper_files/paper/2019/hash/cf9a242b70f45317ffd281241fa66502-Abstract.html) 和 [BestDICE](https://arxiv.org/abs/2007.03438)。
 
 ## 运行
 

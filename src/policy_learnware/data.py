@@ -59,3 +59,16 @@ def load_episode(path, horizon=None):
         else:
             raise ValueError(f"{path} needs its final successor or a known terminal/horizon")
         return Episode(s, a, r, nxt, term, trunc, valid)
+
+
+def episode_prefix(episode, length):
+    """Reveal at most length transitions, including the last observed successor."""
+    if length < 1:
+        raise ValueError("prefix length must be positive")
+    if len(episode.rewards) <= length:
+        return episode
+    truncated = episode.truncated[:length].copy()
+    truncated[-1] = True
+    return Episode(episode.obs[:length], episode.actions[:length], episode.rewards[:length],
+                   episode.next_obs[:length], episode.terminated[:length], truncated,
+                   None if episode.next_valid is None else episode.next_valid[:length])
