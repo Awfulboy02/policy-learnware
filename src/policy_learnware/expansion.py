@@ -2,6 +2,7 @@
 import argparse
 from copy import deepcopy
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from time import perf_counter
 
 import numpy as np
@@ -60,6 +61,35 @@ def evaluate(policy, env, seeds, directory=None, *, record_speed=False):
             "lengths": lengths.tolist(), "seeds": seeds}, paths
 
 
+def qualify(policy, task, source, seed, out, *, qualification_episodes=16,
+            spec_episodes=16, behavior_episodes=4):
+    """Audit one selected snapshot, then export disjoint source data when it passes."""
+    seeds = panel_seeds(2, qualification_episodes)
+    audit_env = create_env(task, source, len(seeds), seed)
+    audit, _ = evaluate(policy, audit_env, seeds)
+    floor = FLOORS[task][int(source[-1])]
+    audit.update(floor=floor, passed=audit["mean_return"] >= floor)
+    if not audit["passed"]:
+        return audit, [], []
+
+    def collect(seeds, directory, record_speed=False):
+        # Publish only complete sets of episodes. An interrupted native evaluation can retry.
+        if not directory.is_dir():
+            env = create_env(task, source, len(seeds), seed)
+            with TemporaryDirectory(dir=out) as tmp:
+                pending = Path(tmp) / directory.name
+                evaluate(policy, env, seeds, pending, record_speed=record_speed)
+                pending.rename(directory)
+        return [str(directory / f"episode_{i:03}.npz") for i in range(len(seeds))]
+
+    episodes = collect(panel_seeds(3, spec_episodes, seed), out / "episodes")
+    behavior = []
+    if behavior_episodes:
+        behavior = collect(panel_seeds(4, behavior_episodes), out / "behavior",
+                           record_speed=task == "CheetahRun")
+    return audit, episodes, behavior
+
+
 def run(args):
     from . import expansion_offpolicy, expansion_sacppo
 
@@ -116,21 +146,10 @@ def run(args):
     training_seconds = perf_counter() - training_started - slice_seconds
     best = max(slices, key=lambda row: row["mean_return"])
     policy = load_policy(best["policy"])
-    seeds = panel_seeds(2, args.qualification_episodes)
-    audit_env = create_env(args.task, args.source, len(seeds), args.seed)
-    audit, _ = evaluate(policy, audit_env, seeds)
-    passed = audit["mean_return"] >= floor
-    audit.update(floor=floor, passed=passed)
-    episodes, behavior = [], []
-    if passed:
-        seeds = panel_seeds(3, args.spec_episodes, args.seed)
-        spec_env = create_env(args.task, args.source, len(seeds), args.seed)
-        _, episodes = evaluate(policy, spec_env, seeds, out / "episodes")
-        if args.behavior_episodes:
-            seeds = panel_seeds(4, args.behavior_episodes)
-            heldout = create_env(args.task, args.source, len(seeds), args.seed)
-            _, behavior = evaluate(policy, heldout, seeds, out / "behavior",
-                                   record_speed=args.task == "CheetahRun")
+    audit, episodes, behavior = qualify(
+        policy, args.task, args.source, args.seed, out,
+        qualification_episodes=args.qualification_episodes, spec_episodes=args.spec_episodes,
+        behavior_episodes=args.behavior_episodes)
     result = {"id": out.name, "task": args.task, "source": args.source,
               "algorithm": args.algorithm, "seed": args.seed, "device": args.device,
               "selected_step": best["env_steps"], "slices": slices, "updates": updates,
@@ -138,7 +157,7 @@ def run(args):
               "behavior_episodes": behavior,
               "training_seconds": training_seconds, "wall_seconds": perf_counter() - started}
     write_json(out / "result.json", result)
-    print(f"selected={best['env_steps']} qualification={audit['mean_return']:.2f} passed={passed}")
+    print(f"selected={best['env_steps']} qualification={audit['mean_return']:.2f} passed={audit['passed']}")
 
 
 def main():

@@ -4,24 +4,33 @@ from functools import lru_cache
 import numpy as np
 
 
-@lru_cache(maxsize=3)
-def _native_task(task):
-    import jax
+def source_bounds(task, source):
+    limit = {"CheetahRun": np.pi, "WalkerWalk": 1.000001, "ReacherEasy": 1.0}[task]
+    return {"s0": (-limit, 0.0), "s1": (0.0, limit)}[source]
+
+
+def native_env(task):
     from mujoco_playground import registry
 
     config = registry.get_default_config(task)
     config.update({"action_repeat": 1, "vision": False, "episode_length": 1000})
-    env = registry.load(task, config=config)
+    return registry.load(task, config=config)
+
+
+def source_feature(task, env):
     if task == "ReacherEasy":
         target = int(env.mj_model.body("target").mocapid[0])
+        return lambda state: state.data.mocap_pos[target, 0]
+    index = {"CheetahRun": 3, "WalkerWalk": 0}[task]
+    return lambda state: state.obs[index]
 
-        def reset_feature(state):
-            return state.data.mocap_pos[target, 0]
-    else:
-        index = {"CheetahRun": 3, "WalkerWalk": 0}[task]
 
-        def reset_feature(state):
-            return state.obs[index]
+@lru_cache(maxsize=3)
+def _native_task(task):
+    import jax
+
+    env = native_env(task)
+    reset_feature = source_feature(task, env)
 
     def sample_source(seeds, lower, upper):
         def trial(i):
@@ -44,8 +53,7 @@ class _SourceEnv:
     horizon = 1000
 
     def __init__(self, task, source, num_envs, seed):
-        limit = {"CheetahRun": np.pi, "WalkerWalk": 1.000001, "ReacherEasy": 1.0}[task]
-        self.bounds = {"s0": (-limit, 0.0), "s1": (0.0, limit)}[source]
+        self.bounds = source_bounds(task, source)
         native, self._sample, self._step = _native_task(task)
         self.action_size = native.action_size
         self.control_dt = float(native.dt)
