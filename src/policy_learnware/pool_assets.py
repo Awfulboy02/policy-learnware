@@ -36,17 +36,17 @@ def check_panel(row, panel, count):
 
 
 def check_actions(policy, episodes):
-    # Include different starts and later times; compare with logged deterministic actions.
-    obs, actions = [], []
-    for ep in episodes:
-        ii = np.linspace(0, len(ep.obs) - 1, 3, dtype=int)
-        obs.append(ep.obs[ii])
-        actions.append(ep.actions[ii])
-    expected = np.concatenate(actions)
-    actual = np.asarray(policy(np.concatenate(obs)))
-    if actual.shape != expected.shape or not np.isfinite(actual).all():
-        raise ValueError("invalid frozen policy output")
-    np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-4)
+    # Recreate the collector's batch shape. XLA can select a different dot
+    # implementation for a 60-state concatenation than for the original 16 or 4.
+    for group in (episodes[:16], episodes[16:]):
+        last = min(len(ep.obs) for ep in group) - 1
+        for t in (0, last // 2, last):
+            observations = np.stack([ep.obs[t] for ep in group])
+            expected = np.stack([ep.actions[t] for ep in group])
+            actual = np.asarray(policy(observations))
+            if actual.shape != expected.shape or not np.isfinite(actual).all():
+                raise ValueError("invalid frozen policy output")
+            np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-4)
 
 
 def publish(run_dir, pool_dir):
